@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="file_transfer_levels">
+        <item>0 - 关闭文件传输</item>
+        <item>1 - 仅局域网</item>
+        <item>2 - 局域网 + NAT打洞</item>
+        <item>3 - 完全开放（含服务端中转）</item>
+    </string-array>
+</resources>

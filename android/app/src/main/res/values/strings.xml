@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SyncClipboard</string>
+    <string name="accessibility_service_desc">SyncClipboard 使用无障碍服务在后台持续监听剪切板变化，并实时与云端同步剪切板内容。</string>
+</resources>

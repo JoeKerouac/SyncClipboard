@@ -1,0 +1,14 @@
+[Unit]
+Description=SyncClipboard - Clipboard Sync Service
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/joe/App/SyncClipboard
+ExecStart=/home/joe/App/SyncClipboard/start.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

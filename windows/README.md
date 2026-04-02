@@ -1,0 +1,1 @@
+使用方法：编译好的exe文件和config.ini放到一起，然后执行`sync_clipboard.exe --install`即可将应用安装为开机自启，并且立即启动；如果需要卸载，可以执行`sync_clipboard.exe --uninstall`
