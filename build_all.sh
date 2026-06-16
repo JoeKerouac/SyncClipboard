@@ -78,7 +78,7 @@ build_windows() {
         -L"$WIN64_PREFIX/lib64" \
         -lwebsockets_static -lssl -lcrypto \
         -lws2_32 -lgdi32 -lcrypt32 -liphlpapi -lpthread -lshlwapi -lshell32 \
-        -static 2>/dev/null
+        -static -mwindows 2>/dev/null
 
     echo -e "${GREEN}  ✔ windows/build/sync_clipboard.exe${NC}"
     record "Windows:   OK"

@@ -32,3 +32,6 @@ target_link_libraries(sync_clipboard
     ws2_32
     iphlpapi
 )
+
+# Build as GUI subsystem so no console window appears on auto-start
+target_link_options(sync_clipboard PRIVATE -mwindows)

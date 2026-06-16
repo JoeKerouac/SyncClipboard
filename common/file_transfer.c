@@ -589,7 +589,8 @@ ft_sock_t ft_lan_transfer_auth(ft_sock_t listen_fd,
             idx++;
         }
         for (int i = 0; i < peer_count && result == FT_INVALID_SOCK; i++) {
-            if (conn_socks && conn_socks[i] != FT_INVALID_SOCK && (pfds[idx].revents & POLLOUT)) {
+            if (conn_socks && conn_socks[i] != FT_INVALID_SOCK &&
+                (pfds[idx].revents & (POLLOUT|POLLERR|POLLHUP))) {
                 int err = 0; socklen_t elen = sizeof(err);
                 getsockopt(conn_socks[i], SOL_SOCKET, SO_ERROR, &err, &elen);
                 if (err == 0) {
@@ -602,7 +603,7 @@ ft_sock_t ft_lan_transfer_auth(ft_sock_t listen_fd,
                                        : ft_auth_recv(c, file_id, key_hex);
                     if (ok == 0) { printf("[AUTH-LOOP] Auth OK (outgoing[%d])\n", i); ft_set_sock_timeout(c, 0); result = c; }
                     else { printf("[AUTH-LOOP] Auth FAILED (outgoing[%d]), closing\n", i); ft_close(c); }
-                } else if (pfds[idx].revents & (POLLERR|POLLHUP)) {
+                } else {
                     printf("[AUTH-LOOP] Outgoing connect FAILED to peer_addr[%d] (err=%d)\n", i, err);
                     ft_close(conn_socks[i]);
                     conn_socks[i] = FT_INVALID_SOCK;
@@ -610,7 +611,8 @@ ft_sock_t ft_lan_transfer_auth(ft_sock_t listen_fd,
             }
             idx++;
         }
-        if (result == FT_INVALID_SOCK && nat_idx >= 0 && (pfds[nat_idx].revents & POLLOUT)) {
+        if (result == FT_INVALID_SOCK && nat_idx >= 0 &&
+            (pfds[nat_idx].revents & (POLLOUT|POLLERR|POLLHUP))) {
             int err = 0; socklen_t elen = sizeof(err);
             getsockopt(nat_sock, SOL_SOCKET, SO_ERROR, &err, &elen);
             if (err == 0) {
@@ -621,10 +623,18 @@ ft_sock_t ft_lan_transfer_auth(ft_sock_t listen_fd,
                                    : ft_auth_recv(nat_sock, file_id, key_hex);
                 if (ok == 0) { ft_set_sock_timeout(nat_sock, 0); result = nat_sock; nat_sock = FT_INVALID_SOCK; }
                 else { ft_close(nat_sock); nat_sock = FT_INVALID_SOCK; }
+            } else {
+                printf("[AUTH-LOOP] NAT connect FAILED (err=%d)\n", err);
+                ft_close(nat_sock); nat_sock = FT_INVALID_SOCK;
             }
         }
         free(pfds);
 #endif
+    }
+
+    if (result == FT_INVALID_SOCK) {
+        int elapsed = (int)(ft_now_ms() - t0);
+        printf("[AUTH-LOOP] No connection established after %d ms (timeout=%d ms)\n", elapsed, timeout_ms);
     }
 
     if (conn_socks) {
