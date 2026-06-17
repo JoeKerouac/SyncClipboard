@@ -5,10 +5,10 @@ import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorato
 
 public class ClientSession {
     private final WebSocketSession session;
-    private boolean authenticated;
-    private boolean loggedIn;
-    private String username;
-    private String deviceId;
+    private volatile boolean authenticated;
+    private volatile boolean loggedIn;
+    private volatile String username;
+    private volatile String deviceId;
 
     public ClientSession(WebSocketSession session) {
         this.session = new ConcurrentWebSocketSessionDecorator(session, 5000, 2 * 1024 * 1024);

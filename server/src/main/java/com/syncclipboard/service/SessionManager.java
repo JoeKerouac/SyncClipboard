@@ -1,6 +1,7 @@
 package com.syncclipboard.service;
 
 import com.syncclipboard.model.ClientSession;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -15,6 +16,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
@@ -30,6 +32,15 @@ public class SessionManager {
 
     public void addSession(WebSocketSession session) {
         sessions.put(session.getId(), new ClientSession(session));
+    }
+
+    public void addAuthenticated(WebSocketSession session, String username, String deviceId) {
+        ClientSession cs = new ClientSession(session);
+        cs.setAuthenticated(true);
+        cs.setLoggedIn(true);
+        cs.setUsername(username);
+        cs.setDeviceId(deviceId);
+        sessions.put(session.getId(), cs);
     }
 
     public void removeSession(String sessionId) {
@@ -78,7 +89,13 @@ public class SessionManager {
         }
 
         return futures.stream()
-                .map(CompletableFuture::join)
+                .map(f -> {
+                    try {
+                        return f.orTimeout(5, TimeUnit.SECONDS).join();
+                    } catch (Exception e) {
+                        return new SendResult("?", "?", false, 0, "timeout: " + e.getMessage());
+                    }
+                })
                 .collect(Collectors.toList());
     }
 
@@ -101,5 +118,19 @@ public class SessionManager {
             }
         }
         return sent;
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        log.info("[SHUTDOWN] 关闭 broadcastPool, pending sessions={}", sessions.size());
+        broadcastPool.shutdown();
+        try {
+            if (!broadcastPool.awaitTermination(5, TimeUnit.SECONDS)) {
+                broadcastPool.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            broadcastPool.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 }

@@ -242,7 +242,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopForegroundService() {
         stopService(Intent(this, ClipboardService::class.java))
-        try { stopService(Intent(this, Class.forName("com.syncclipboard.android.service.KeepAliveService"))) } catch (_: Exception) {}
         serviceRunning = false
         binding.tvStatus.text = "状态：已停止"
         updateButtonStates()

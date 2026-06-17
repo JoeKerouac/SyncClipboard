@@ -4,3 +4,15 @@ gradle
 build
 target
 deps
+
+# Server runtime data (secrets / credentials must never be committed)
+server/data/
+server/users.properties
+
+# Local config / secrets
+**/local.properties
+*.pem
+*.p12
+*.jks
+*.keystore
+*.key

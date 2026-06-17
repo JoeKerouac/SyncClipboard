@@ -14,6 +14,10 @@
 #include "../common/crypto.h"
 #include "../common/cJSON.h"
 #include "../common/file_transfer.h"
+#include "../common/log.h"
+#include "../common/auth_http.h"
+#include "../common/ws_client.h"
+#include "../common/msg.h"
 #include "stb_image.h"
 #include "stb_image_write.h"
 
@@ -64,6 +68,9 @@ static int is_suppressed(void) {
 
 static struct lws *g_wsi = NULL;
 static struct lws_context *g_context = NULL;
+static AuthTokens g_tokens;
+static char g_ws_subproto[1200];
+static int g_reconnect_delay = 1;
 
 /* ---- File transfer state ---- */
 
@@ -94,7 +101,6 @@ typedef struct {
 static TransferState g_xfer = {0};
 static pthread_mutex_t g_xfer_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int g_xfer_active_count = 0;
-static int g_reconnect_delay = 1;
 
 static void signal_handler(int sig) { (void)sig; g_running = 0; }
 
@@ -109,7 +115,7 @@ static Atom     g_prop_atom = 0;   /* property atom for selection transfer */
 static void detect_display_server(void) {
     const char *wl = getenv("WAYLAND_DISPLAY");
     if (wl && wl[0]) g_use_wayland = 1;
-    printf("[DISPLAY] %s session detected\n", g_use_wayland ? "Wayland" : "X11");
+    LOG_INFO("[DISPLAY] %s session detected\n", g_use_wayland ? "Wayland" : "X11");
 }
 
 /* ---- Clipboard operations abstraction ---- */
@@ -146,7 +152,7 @@ static void xclip_clipboard_set_text(const char *text) {
     /* Also set PRIMARY so Shift+Insert works in terminals */
     fp = popen("xclip -selection primary -i 2>/dev/null", "w");
     if (fp) { fwrite(text, 1, len, fp); pclose(fp); }
-    printf("[CLIPBOARD] Text set OK (%zu bytes)\n", len);
+    LOG_INFO("[CLIPBOARD] Text set OK (%zu bytes)\n", len);
 }
 
 static char g_cached_types[4096] = {0};
@@ -322,7 +328,7 @@ static void wl_clipboard_set_text(const char *text) {
     size_t len = strlen(text);
     FILE *fp = popen("wl-copy 2>/dev/null", "w");
     if (fp) { fwrite(text, 1, len, fp); pclose(fp); }
-    printf("[CLIPBOARD] Text set OK (%zu bytes, wl-copy)\n", len);
+    LOG_INFO("[CLIPBOARD] Text set OK (%zu bytes, wl-copy)\n", len);
 }
 
 static void wl_clipboard_refresh_types(char *buf, size_t buf_size) {
@@ -366,7 +372,7 @@ static void wl_clipboard_set_image(const uint8_t *data, size_t len, const char *
     snprintf(cmd, sizeof(cmd), "wl-copy --type %s 2>/dev/null", mime);
     FILE *fp = popen(cmd, "w");
     if (fp) { fwrite(data, 1, len, fp); pclose(fp); }
-    printf("[CLIPBOARD] Image set OK (%zu bytes, %s, wl-copy)\n", len, mime);
+    LOG_INFO("[CLIPBOARD] Image set OK (%zu bytes, %s, wl-copy)\n", len, mime);
     free(converted);
 }
 
@@ -375,7 +381,7 @@ static void wl_clipboard_set_file(const char *filepath) {
     if (!fp) return;
     fprintf(fp, "copy\n%s", filepath);
     pclose(fp);
-    printf("[CLIPBOARD] File set OK (%s, wl-copy)\n", filepath);
+    LOG_INFO("[CLIPBOARD] File set OK (%s, wl-copy)\n", filepath);
 }
 
 /* ---- X11 Selection API clipboard reads ---- */
@@ -548,10 +554,10 @@ static void xclip_clipboard_set_image(const uint8_t *data, size_t len, const cha
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "xclip -selection clipboard -t %s -i 2>/dev/null", mime);
     FILE *fp = popen(cmd, "w");
-    if (!fp) { fprintf(stderr, "[CLIPBOARD] Failed to set image\n"); free(converted); return; }
+    if (!fp) { LOG_WARN("[CLIPBOARD] Failed to set image\n"); free(converted); return; }
     fwrite(data, 1, len, fp);
     pclose(fp);
-    printf("[CLIPBOARD] Image set OK (%zu bytes, %s)\n", len, mime);
+    LOG_INFO("[CLIPBOARD] Image set OK (%zu bytes, %s)\n", len, mime);
     free(converted);
 }
 
@@ -560,7 +566,7 @@ static void xclip_clipboard_set_file(const char *filepath) {
     if (!fp) return;
     fprintf(fp, "copy\nfile://%s", filepath);
     pclose(fp);
-    printf("[CLIPBOARD] File set OK (%s)\n", filepath);
+    LOG_INFO("[CLIPBOARD] File set OK (%s)\n", filepath);
 }
 
 /* ---- JSON message builders ---- */
@@ -665,7 +671,7 @@ static void queue_send(const char *msg) {
 static void *receiver_thread(void *arg) {
     TransferState *st = (TransferState*)arg;
     __sync_add_and_fetch(&g_xfer_active_count, 1);
-    printf("[P2P-RECV] Starting transfer for fileId=%s, sameLan=%d\n", st->file_id, st->same_lan);
+    LOG_INFO("[P2P-RECV] Starting transfer for fileId=%s, sameLan=%d\n", st->file_id, st->same_lan);
 
     const char *peer_ptrs[FT_MAX_ADDRS];
     for (int i = 0; i < st->peer_addr_count; i++) peer_ptrs[i] = st->peer_addrs[i];
@@ -675,13 +681,13 @@ static void *receiver_thread(void *arg) {
 
     ft_sock_t nat_sock = FT_INVALID_SOCK;
     if (!st->same_lan && st->peer_public_addr[0] && st->eff_file_level >= 2) {
-        printf("[P2P-RECV] NAT punch start -> %s\n", st->peer_public_addr);
+        LOG_INFO("[P2P-RECV] NAT punch start -> %s\n", st->peer_public_addr);
         nat_sock = ft_nat_punch_start(st->peer_public_addr, g_config.server_host, st->udp_port);
     }
 
     for (int i = 0; i < st->peer_addr_count; i++)
-        printf("[P2P-RECV]   peer_addr[%d] = %s\n", i, st->peer_addrs[i]);
-    printf("[P2P-RECV] listen_fd=%d, LAN+NAT parallel (%d peer addrs, nat=%s, 5000ms)...\n",
+        LOG_INFO("[P2P-RECV]   peer_addr[%d] = %s\n", i, st->peer_addrs[i]);
+    LOG_INFO("[P2P-RECV] listen_fd=%d, LAN+NAT parallel (%d peer addrs, nat=%s, 5000ms)...\n",
            st->listen_fd, st->peer_addr_count, nat_sock != FT_INVALID_SOCK ? "yes" : "no");
     ft_sock_t sock = ft_lan_transfer_auth(st->listen_fd, peer_ptrs, st->peer_addr_count,
                                           nat_sock, 5000,
@@ -692,14 +698,14 @@ static void *receiver_thread(void *arg) {
     long long conn_ms = t_conn - t0;
 
     if (sock != FT_INVALID_SOCK) {
-        printf("[P2P-RECV] Connected via %s (%lld ms), receiving file...\n", method, conn_ms);
+        LOG_INFO("[P2P-RECV] Connected via %s (%lld ms), receiving file...\n", method, conn_ms);
         char tmp_path[512];
         snprintf(tmp_path, sizeof(tmp_path), "/tmp/syncclip_%s", st->file_name);
         FtFileInfo recv_info = {0};
         if (ft_recv_file_to_path(sock, &recv_info, tmp_path) == 0) {
             long long xfer_ms = now_ms() - t_conn;
             double speed = xfer_ms > 0 ? (double)recv_info.file_size / 1024.0 / 1024.0 / ((double)xfer_ms / 1000.0) : 0;
-            printf("[P2P-RECV] Received %s (%llu bytes) in %lld ms (%.1f MB/s)\n",
+            LOG_INFO("[P2P-RECV] Received %s (%llu bytes) in %lld ms (%.1f MB/s)\n",
                    st->file_name, (unsigned long long)recv_info.file_size, xfer_ms, speed);
             ft_sha256_file(tmp_path, g_last_img_hash);
             suppress_clipboard_ms(2000);
@@ -715,25 +721,25 @@ static void *receiver_thread(void *arg) {
                 remove(tmp_path);
             } else {
                 g_clip_ops.set_file(tmp_path);
-                printf("[P2P-RECV] File saved to %s\n", tmp_path);
+                LOG_INFO("[P2P-RECV] File saved to %s\n", tmp_path);
             }
             st->success = 1;
             char *r = build_transfer_result(st->file_id, method, 1, conn_ms, xfer_ms);
             queue_send(r); free(r);
         } else {
-            fprintf(stderr, "[P2P-RECV] Receive failed\n");
+            LOG_WARN("[P2P-RECV] Receive failed\n");
         }
         ft_close(sock);
     }
 
     /* Relay fallback (requires level >= 3) */
     if (!st->success && st->eff_file_level >= 3 && (long long)st->file_size <= st->max_relay_size) {
-        printf("[P2P-RECV] P2P failed, requesting relay (size=%llu, max=%ld)\n",
+        LOG_INFO("[P2P-RECV] P2P failed, requesting relay (size=%llu, max=%ld)\n",
                (unsigned long long)st->file_size, st->max_relay_size);
         char *req = build_file_relay_request(st->file_id);
         queue_send(req); free(req);
     } else if (!st->success) {
-        fprintf(stderr, "[P2P-RECV] All methods failed, giving up fileId=%s\n", st->file_id);
+        LOG_WARN("[P2P-RECV] All methods failed, giving up fileId=%s\n", st->file_id);
         char *r = build_transfer_result(st->file_id, "failed", 0, now_ms() - t0, 0);
         queue_send(r); free(r);
     }
@@ -749,7 +755,7 @@ static void *receiver_thread(void *arg) {
 static void *sender_thread(void *arg) {
     TransferState *st = (TransferState*)arg;
     __sync_add_and_fetch(&g_xfer_active_count, 1);
-    printf("[P2P-SEND] Starting transfer for fileId=%s, sameLan=%d\n", st->file_id, st->same_lan);
+    LOG_INFO("[P2P-SEND] Starting transfer for fileId=%s, sameLan=%d\n", st->file_id, st->same_lan);
 
     const char *peer_ptrs[FT_MAX_ADDRS];
     for (int i = 0; i < st->peer_addr_count; i++) peer_ptrs[i] = st->peer_addrs[i];
@@ -760,13 +766,13 @@ static void *sender_thread(void *arg) {
 
     ft_sock_t nat_sock = FT_INVALID_SOCK;
     if (!st->same_lan && st->peer_public_addr[0] && st->eff_file_level >= 2) {
-        printf("[P2P-SEND] NAT punch start -> %s\n", st->peer_public_addr);
+        LOG_INFO("[P2P-SEND] NAT punch start -> %s\n", st->peer_public_addr);
         nat_sock = ft_nat_punch_start(st->peer_public_addr, g_config.server_host, st->udp_port);
     }
 
     for (int i = 0; i < st->peer_addr_count; i++)
-        printf("[P2P-SEND]   peer_addr[%d] = %s\n", i, st->peer_addrs[i]);
-    printf("[P2P-SEND] listen_fd=%d, LAN+NAT parallel (%d peer addrs, nat=%s, %dms)...\n",
+        LOG_INFO("[P2P-SEND]   peer_addr[%d] = %s\n", i, st->peer_addrs[i]);
+    LOG_INFO("[P2P-SEND] listen_fd=%d, LAN+NAT parallel (%d peer addrs, nat=%s, %dms)...\n",
            st->listen_fd, st->peer_addr_count, nat_sock != FT_INVALID_SOCK ? "yes" : "no",
            total_timeout);
     ft_sock_t sock = ft_lan_transfer_auth(st->listen_fd, peer_ptrs, st->peer_addr_count,
@@ -775,7 +781,7 @@ static void *sender_thread(void *arg) {
 
     while (sock != FT_INVALID_SOCK) {
         long long conn_ms = now_ms() - t0;
-        printf("[P2P-SEND] Connected (%lld ms), sending file (%llu bytes)...\n",
+        LOG_INFO("[P2P-SEND] Connected (%lld ms), sending file (%llu bytes)...\n",
                conn_ms, (unsigned long long)st->file_size);
         long long t_xfer = now_ms();
         int send_ok;
@@ -793,9 +799,9 @@ static void *sender_thread(void *arg) {
             long long xfer_ms = now_ms() - t_xfer;
             double speed = xfer_ms > 0 ? (double)st->file_size / 1024.0 / 1024.0 / ((double)xfer_ms / 1000.0) : 0;
             sent_count++;
-            printf("[P2P-SEND] Sent #%d in %lld ms (%.1f MB/s)\n", sent_count, xfer_ms, speed);
+            LOG_INFO("[P2P-SEND] Sent #%d in %lld ms (%.1f MB/s)\n", sent_count, xfer_ms, speed);
         } else {
-            fprintf(stderr, "[P2P-SEND] Send failed\n");
+            LOG_WARN("[P2P-SEND] Send failed\n");
         }
         ft_close(sock);
         sock = FT_INVALID_SOCK;
@@ -809,7 +815,7 @@ static void *sender_thread(void *arg) {
 
     if (sent_count == 0) {
         long long conn_ms = now_ms() - t0;
-        fprintf(stderr, "[P2P-SEND] No connection established after %lld ms, giving up\n", conn_ms);
+        LOG_WARN("[P2P-SEND] No connection established after %lld ms, giving up\n", conn_ms);
     } else {
         st->success = 1;
     }
@@ -826,10 +832,12 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
     (void)user;
     switch (reason) {
     case LWS_CALLBACK_CLIENT_ESTABLISHED:
-        printf("[WS] Connected to server\n");
+        LOG_INFO("connected to server (v2 authenticated via JWT handshake)");
         g_connected = 1;
+        g_authenticated = 1;
+        g_logged_in = 1;
         g_reconnect_delay = 1;
-        { char *a = build_auth_msg(g_config.server_key); queue_send(a); free(a); }
+        { char *h = sc_msg_hello("linux", g_config.device_id, "2.0.0"); queue_send(h); free(h); }
         break;
 
     case LWS_CALLBACK_CLIENT_RECEIVE: {
@@ -857,37 +865,33 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         const char *type = cJSON_GetStringValue(cJSON_GetObjectItem(j, "type"));
         if (!type) { cJSON_Delete(j); break; }
 
-        printf("[RECV] type=%s\n", type);
+        LOG_INFO("[RECV] type=%s\n", type);
 
-        if (strcmp(type, "auth_result") == 0) {
-            if (cJSON_IsTrue(cJSON_GetObjectItem(j, "success"))) {
-                g_authenticated = 1;
-                char *l = build_login_msg(g_config.username, g_config.password, g_config.device_id);
-                queue_send(l); free(l);
-            }
-        } else if (strcmp(type, "login_result") == 0) {
-            if (cJSON_IsTrue(cJSON_GetObjectItem(j, "success"))) {
-                cJSON *ftl = cJSON_GetObjectItem(j, "fileTransferLevel");
-                g_server_file_level = ftl ? (int)cJSON_GetNumberValue(ftl) : 3;
-                printf("[LOGIN] Login successful, sync active (serverFileLevel=%d, clientFileLevel=%d)\n",
-                       g_server_file_level, g_config.file_transfer_level);
-                g_logged_in = 1;
-            }
+        if (strcmp(type, "hello_ack") == 0) {
+            cJSON *ftl = cJSON_GetObjectItem(j, "serverFileLevel");
+            g_server_file_level = ftl ? (int)cJSON_GetNumberValue(ftl) : 3;
+            LOG_INFO("hello_ack: serverFileLevel=%d", g_server_file_level);
+        } else if (strcmp(type, "auth_result") == 0 || strcmp(type, "login_result") == 0) {
+            /* Legacy v1 messages — ignore silently if server echoes them. */
         } else if (strcmp(type, "clipboard") == 0) {
             const char *content = cJSON_GetStringValue(cJSON_GetObjectItem(j, "content"));
             if (content) {
                 size_t dec_len = 0;
-                char *dec = aes_decrypt(content, g_config.aes_key, &dec_len);
+                /* Try v2 GCM first, fallback to legacy CBC. */
+                char *dec = aes_gcm_decrypt(content, g_config.aes_key, &dec_len);
+                if (!dec) dec = aes_decrypt(content, g_config.aes_key, &dec_len);
                 if (dec) {
                     ft_sha256((const uint8_t*)dec, strlen(dec), g_last_clip_hash);
                     suppress_clipboard_ms(2000);
                     g_clip_ops.set_text(dec);
                     free(dec);
+                } else {
+                    LOG_WARN("clipboard decrypt failed (key mismatch?)");
                 }
             }
         } else if (strcmp(type, "file_notify") == 0) {
             if (effective_file_level() <= 0) {
-                printf("[FILE] File transfer disabled, ignoring file_notify\n");
+                LOG_INFO("[FILE] File transfer disabled, ignoring file_notify\n");
                 cJSON_Delete(j); break;
             }
             /* Another client copied a file/image — start receiving */
@@ -921,7 +925,7 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
             FtAddrList my_addrs = {0};
             ft_get_local_addresses(&my_addrs, port);
 
-            printf("[FILE] Received file_notify: %s (%llu bytes) from %s\n",
+            LOG_INFO("[FILE] Received file_notify: %s (%llu bytes) from %s\n",
                    g_xfer.file_name, (unsigned long long)g_xfer.file_size, g_xfer.from_device);
 
             char *req = build_file_request(fid, &my_addrs);
@@ -934,17 +938,17 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
             const char *fid = cJSON_GetStringValue(cJSON_GetObjectItem(j, "fileId"));
             const char *role = cJSON_GetStringValue(cJSON_GetObjectItem(j, "role"));
             if (fid && strcmp(fid, g_xfer.file_id) != 0) {
-                printf("[FILE] Ignoring stale peer_info for fileId=%s (current=%s)\n", fid, g_xfer.file_id);
+                LOG_INFO("[FILE] Ignoring stale peer_info for fileId=%s (current=%s)\n", fid, g_xfer.file_id);
                 pthread_mutex_unlock(&g_xfer_lock);
                 cJSON_Delete(j); break;
             }
             if (!g_xfer.is_sender && (g_xfer_active_count > 0 || g_xfer.phase >= 2)) {
-                printf("[FILE] Ignoring duplicate peer_info (receiver transfer already active)\n");
+                LOG_INFO("[FILE] Ignoring duplicate peer_info (receiver transfer already active)\n");
                 pthread_mutex_unlock(&g_xfer_lock);
                 cJSON_Delete(j); break;
             }
             if (g_xfer.is_sender && g_xfer_active_count > 0) {
-                printf("[FILE] Starting parallel sender for additional peer (active=%d)\n", g_xfer_active_count);
+                LOG_INFO("[FILE] Starting parallel sender for additional peer (active=%d)\n", g_xfer_active_count);
             }
             const char *pub = cJSON_GetStringValue(cJSON_GetObjectItem(j, "peerPublicAddress"));
             if (pub) strncpy(g_xfer.peer_public_addr, pub, sizeof(g_xfer.peer_public_addr)-1);
@@ -968,7 +972,7 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
             g_xfer.eff_file_level = eff;
             g_xfer.same_lan = cJSON_IsTrue(cJSON_GetObjectItem(j, "sameLan"));
 
-            printf("[FILE] peer_info role=%s, peer_public=%s, peer_local_count=%d, effLevel=%d, sameLan=%d\n",
+            LOG_INFO("[FILE] peer_info role=%s, peer_public=%s, peer_local_count=%d, effLevel=%d, sameLan=%d\n",
                    role ? role : "?", g_xfer.peer_public_addr, g_xfer.peer_addr_count, eff, g_xfer.same_lan);
 
             g_xfer.phase = 2;
@@ -989,13 +993,13 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         } else if (strcmp(type, "file_relay_request") == 0) {
             /* Server asks us (sender) to relay file data */
             const char *requester = cJSON_GetStringValue(cJSON_GetObjectItem(j, "requesterId"));
-            printf("[RELAY] Relay request from %s for fileId=%s\n",
+            LOG_INFO("[RELAY] Relay request from %s for fileId=%s\n",
                    requester ? requester : "?", g_xfer.file_id);
             if (g_xfer.data && g_xfer.data_len > 0 && requester) {
                 char *rd = build_file_relay_data(g_xfer.file_id, g_xfer.data,
                                                  g_xfer.data_len, g_xfer.file_size, requester);
                 queue_send(rd); free(rd);
-                printf("[RELAY] Sent relay data (%zu bytes)\n", g_xfer.data_len);
+                LOG_INFO("[RELAY] Sent relay data (%zu bytes)\n", g_xfer.data_len);
             }
         } else if (strcmp(type, "file_relay_data") == 0) {
             /* Received relayed file data */
@@ -1004,7 +1008,7 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
             const char *mt   = cJSON_GetStringValue(cJSON_GetObjectItem(j, "mimeType"));
             const char *b64  = cJSON_GetStringValue(cJSON_GetObjectItem(j, "data"));
 
-            printf("[RELAY] Received relay data for %s\n", fn ? fn : "?");
+            LOG_INFO("[RELAY] Received relay data for %s\n", fn ? fn : "?");
             if (b64) {
                 size_t dec_len;
                 uint8_t *dec = ft_base64_decode(b64, strlen(b64), &dec_len);
@@ -1027,7 +1031,7 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
             }
         } else if (strcmp(type, "error") == 0) {
             const char *m = cJSON_GetStringValue(cJSON_GetObjectItem(j, "message"));
-            fprintf(stderr, "[ERROR] %s\n", m ? m : "unknown");
+            LOG_ERROR("[ERROR] %s\n", m ? m : "unknown");
         }
 
         cJSON_Delete(j);
@@ -1059,12 +1063,12 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
     }
 
     case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-        fprintf(stderr, "[WS] Connection error: %s\n", in ? (char*)in : "?");
+        LOG_WARN("[WS] Connection error: %s\n", in ? (char*)in : "?");
         g_connected = 0; g_authenticated = 0; g_logged_in = 0; g_wsi = NULL;
         g_recv_len = 0;
         break;
     case LWS_CALLBACK_CLIENT_CLOSED:
-        printf("[WS] Connection closed\n");
+        LOG_INFO("[WS] Connection closed\n");
         g_connected = 0; g_authenticated = 0; g_logged_in = 0; g_wsi = NULL;
         g_recv_len = 0;
         break;
@@ -1097,13 +1101,13 @@ static void process_clipboard_change(void) {
             }
             strcpy(g_last_img_hash, img_hash);
             const char *ext = strstr(detected_mime, "jpeg") ? "clipboard.jpg" : "clipboard.png";
-            printf("[MONITOR] Image clipboard changed (%zu bytes, %s)\n", img_len, detected_mime);
+            LOG_INFO("[MONITOR] Image clipboard changed (%zu bytes, %s)\n", img_len, detected_mime);
 
             if (g_xfer_active_count > 0) {
-                printf("[MONITOR] Waiting for previous transfer to finish...\n");
+                LOG_INFO("[MONITOR] Waiting for previous transfer to finish...\n");
                 for (int i = 0; i < 50 && g_xfer_active_count > 0; i++) usleep(10000);
                 if (g_xfer_active_count > 0) {
-                    printf("[MONITOR] Previous transfer still active, skipping\n");
+                    LOG_INFO("[MONITOR] Previous transfer still active, skipping\n");
                     free(img);
                     return;
                 }
@@ -1147,12 +1151,12 @@ static void process_clipboard_change(void) {
         if (fpath) {
             struct stat st_buf;
             if (stat(fpath, &st_buf) != 0 || !S_ISREG(st_buf.st_mode)) {
-                printf("[MONITOR] Cannot stat file: %s\n", fpath);
+                LOG_INFO("[MONITOR] Cannot stat file: %s\n", fpath);
                 free(fpath); return;
             }
             long long fsize = (long long)st_buf.st_size;
             if (fsize <= 0 || fsize >= 1024LL*1024*g_config.max_transfer_size) {
-                printf("[MONITOR] File skipped (size=%lld): %s\n", fsize, fpath);
+                LOG_INFO("[MONITOR] File skipped (size=%lld): %s\n", fsize, fpath);
                 free(fpath); return;
             }
 
@@ -1161,10 +1165,10 @@ static void process_clipboard_change(void) {
 
             /* Wait for any active transfer thread to finish (max 500ms) */
             if (g_xfer_active_count > 0) {
-                printf("[MONITOR] Waiting for previous transfer to finish...\n");
+                LOG_INFO("[MONITOR] Waiting for previous transfer to finish...\n");
                 for (int i = 0; i < 50 && g_xfer_active_count > 0; i++) usleep(10000);
                 if (g_xfer_active_count > 0) {
-                    printf("[MONITOR] Previous transfer still active, skipping\n");
+                    LOG_INFO("[MONITOR] Previous transfer still active, skipping\n");
                     free(fpath);
                     return;
                 }
@@ -1172,7 +1176,7 @@ static void process_clipboard_change(void) {
 
             char fhash[65];
             ft_sha256_file(fpath, fhash);
-            printf("[MONITOR] File clipboard changed: %s (%lld bytes)\n", basename, fsize);
+            LOG_INFO("[MONITOR] File clipboard changed: %s (%lld bytes)\n", basename, fsize);
 
             pthread_mutex_lock(&g_xfer_lock);
             if (g_xfer.listen_fd != FT_INVALID_SOCK) { ft_close(g_xfer.listen_fd); g_xfer.listen_fd = FT_INVALID_SOCK; }
@@ -1213,8 +1217,8 @@ static void process_clipboard_change(void) {
     char hash[65]; ft_sha256((const uint8_t*)clip, strlen(clip), hash);
     if (strcmp(hash, g_last_clip_hash) != 0) {
         strcpy(g_last_clip_hash, hash);
-        printf("[MONITOR] Text clipboard changed (%zu bytes)\n", strlen(clip));
-        char *enc = aes_encrypt(clip, strlen(clip), g_config.aes_key);
+        LOG_INFO("[MONITOR] Text clipboard changed (%zu bytes)\n", strlen(clip));
+        char *enc = aes_gcm_encrypt(clip, strlen(clip), g_config.aes_key);
         if (enc) { char *m = build_clipboard_msg(enc); queue_send(m); free(m); free(enc); }
     }
     free(clip);
@@ -1242,8 +1246,8 @@ static void process_primary_change(void) {
     ft_sha256((const uint8_t *)text, strlen(text), hash);
     if (strcmp(hash, g_last_clip_hash) != 0) {
         strcpy(g_last_clip_hash, hash);
-        printf("[MONITOR] PRIMARY text changed (%zu bytes)\n", strlen(text));
-        char *enc = aes_encrypt(text, strlen(text), g_config.aes_key);
+        LOG_INFO("[MONITOR] PRIMARY text changed (%zu bytes)\n", strlen(text));
+        char *enc = aes_gcm_encrypt(text, strlen(text), g_config.aes_key);
         if (enc) {
             char *m = build_clipboard_msg(enc);
             queue_send(m);
@@ -1269,21 +1273,21 @@ static void *clipboard_monitor(void *arg) {
     if (initial) { ft_sha256((const uint8_t*)initial, strlen(initial), g_last_clip_hash); free(initial); }
 
     if (g_use_wayland) {
-        printf("[MONITOR] Clipboard monitor started (Wayland polling, interval=%dms)\n", POLL_INTERVAL_MS);
+        LOG_INFO("[MONITOR] Clipboard monitor started (Wayland polling, interval=%dms)\n", POLL_INTERVAL_MS);
         goto fallback_polling;
     }
 
     XInitThreads();
     Display *xdpy = XOpenDisplay(NULL);
     if (!xdpy) {
-        fprintf(stderr, "[MONITOR] Cannot open X display (DISPLAY=%s), falling back to polling\n",
+        LOG_WARN("[MONITOR] Cannot open X display (DISPLAY=%s), falling back to polling\n",
                 getenv("DISPLAY") ? getenv("DISPLAY") : "(null)");
         goto fallback_polling;
     }
 
     int xfixes_event, xfixes_error;
     if (!XFixesQueryExtension(xdpy, &xfixes_event, &xfixes_error)) {
-        fprintf(stderr, "[MONITOR] XFIXES not available, falling back to polling\n");
+        LOG_WARN("[MONITOR] XFIXES not available, falling back to polling\n");
         XCloseDisplay(xdpy);
         goto fallback_polling;
     }
@@ -1320,7 +1324,7 @@ static void *clipboard_monitor(void *arg) {
     g_clip_ops.read_type = x11_clipboard_read_type;
     /* Keep xclip for writes (set_text, set_image, set_file) */
 
-    printf("[MONITOR] Clipboard monitor started (XFIXES event-driven + X11 direct reads, CLIPBOARD+PRIMARY, event_base=%d)\n", xf_ev_base);
+    LOG_INFO("[MONITOR] Clipboard monitor started (XFIXES event-driven + X11 direct reads, CLIPBOARD+PRIMARY, event_base=%d)\n", xf_ev_base);
 
     int xfd = ConnectionNumber(xdpy);
     long long primary_pending_ms = 0;
@@ -1344,10 +1348,10 @@ static void *clipboard_monitor(void *arg) {
                     usleep(100000);  /* 100ms debounce for content to settle */
                     if (!g_logged_in) continue;
                     if (is_suppressed()) {
-                        printf("[XFIXES] CLIPBOARD changed (suppressed)\n");
+                        LOG_INFO("[XFIXES] CLIPBOARD changed (suppressed)\n");
                         continue;
                     }
-                    printf("[XFIXES] CLIPBOARD changed\n");
+                    LOG_INFO("[XFIXES] CLIPBOARD changed\n");
                     process_clipboard_change();
                 } else if (sev->selection == XA_PRIMARY) {
                     primary_pending_ms = now_ms();
@@ -1359,7 +1363,7 @@ static void *clipboard_monitor(void *arg) {
         if (primary_pending_ms > 0 && now_ms() - primary_pending_ms >= 500) {
             primary_pending_ms = 0;
             if (g_logged_in && !is_suppressed()) {
-                printf("[XFIXES] PRIMARY changed (debounced)\n");
+                LOG_INFO("[XFIXES] PRIMARY changed (debounced)\n");
                 process_primary_change();
             }
         }
@@ -1372,7 +1376,7 @@ static void *clipboard_monitor(void *arg) {
     return NULL;
 
 fallback_polling:
-    printf("[MONITOR] Clipboard monitor started (polling, interval=%dms)\n", POLL_INTERVAL_MS);
+    LOG_INFO("[MONITOR] Clipboard monitor started (polling, interval=%dms)\n", POLL_INTERVAL_MS);
     while (g_running) {
         usleep(POLL_INTERVAL_MS * 1000);
         if (!g_logged_in) continue;
@@ -1408,9 +1412,9 @@ int main(int argc, char **argv) {
             g_clip_ops.read_type = wl_clipboard_read_type;
             g_clip_ops.set_image = wl_clipboard_set_image;
             g_clip_ops.set_file = wl_clipboard_set_file;
-            printf("[CLIPBOARD] Using wl-clipboard backend\n");
+            LOG_INFO("[CLIPBOARD] Using wl-clipboard backend\n");
         } else {
-            printf("[CLIPBOARD] wl-clipboard not found, falling back to xclip\n");
+            LOG_INFO("[CLIPBOARD] wl-clipboard not found, falling back to xclip\n");
             /* Fall through to xclip setup below */
             g_use_wayland = 0;
         }
@@ -1422,12 +1426,12 @@ int main(int argc, char **argv) {
         g_clip_ops.read_type = xclip_clipboard_read_type;
         g_clip_ops.set_image = xclip_clipboard_set_image;
         g_clip_ops.set_file = xclip_clipboard_set_file;
-        printf("[CLIPBOARD] Using xclip backend\n");
+        LOG_INFO("[CLIPBOARD] Using xclip backend\n");
     }
 
-    printf("=== SyncClipboard Linux Client ===\n");
-    printf("Server: %s:%d%s\n", g_config.server_host, g_config.server_port, g_config.server_path);
-    printf("User: %s, Device: %s\n", g_config.username, g_config.device_id);
+    LOG_INFO("=== SyncClipboard Linux Client ===\n");
+    LOG_INFO("Server: %s:%d%s\n", g_config.server_host, g_config.server_port, g_config.server_path);
+    LOG_INFO("User: %s, Device: %s\n", g_config.username, g_config.device_id);
 
     pthread_t mon_tid;
     pthread_create(&mon_tid, NULL, clipboard_monitor, NULL);
@@ -1444,17 +1448,26 @@ int main(int argc, char **argv) {
 
     while (g_running) {
         if (!g_connected && !g_wsi) {
+            /* v2: acquire JWT before attempting WS handshake */
+            if (ws_acquire_tokens(&g_config, &g_tokens) != 0) {
+                LOG_WARN("could not acquire JWT, retrying in %ds", g_reconnect_delay);
+                sleep(g_reconnect_delay);
+                if (g_reconnect_delay < 60) g_reconnect_delay *= 2;
+                continue;
+            }
+            ws_build_bearer_protocol(g_tokens.access_token, g_ws_subproto, sizeof(g_ws_subproto));
+
             struct lws_client_connect_info conn;
             memset(&conn, 0, sizeof(conn));
             conn.context  = ctx;
             conn.address  = g_config.server_host;
             conn.port     = g_config.server_port;
-            conn.path     = g_config.server_path;
+            conn.path     = "/ws/v2/clipboard";
             conn.host     = g_config.server_host;
             conn.origin   = g_config.server_host;
-            conn.protocol = protocols[0].name;
+            conn.protocol = g_ws_subproto;
             conn.retry_and_idle_policy = &ws_retry;
-            printf("[WS] Connecting...\n");
+            LOG_INFO("connecting to %s:%d/ws/v2/clipboard", g_config.server_host, g_config.server_port);
             g_wsi = lws_client_connect_via_info(&conn);
             if (!g_wsi) {
                 sleep(g_reconnect_delay);

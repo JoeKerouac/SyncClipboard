@@ -10,6 +10,10 @@
 #include "../common/crypto.h"
 #include "../common/cJSON.h"
 #include "../common/file_transfer.h"
+#include "../common/log.h"
+#include "../common/auth_http.h"
+#include "../common/ws_client.h"
+#include "../common/msg.h"
 #include "stb_image.h"
 #include "stb_image_write.h"
 #include <stdarg.h>
@@ -96,6 +100,9 @@ static volatile int g_logged_in = 0;
 static volatile int g_connected = 0;
 static volatile int g_suppress_next = 0;
 static volatile int g_server_file_level = 3;
+static int g_reconnect_delay = 1;
+static AuthTokens g_tokens;
+static char g_ws_subproto[1200];
 
 static char *g_recv_buf = NULL;
 static size_t g_recv_len = 0;
@@ -142,7 +149,6 @@ typedef struct {
 static TransferState g_xfer = {0};
 static CRITICAL_SECTION g_xfer_cs;
 static volatile LONG g_xfer_active_count = 0;
-static int g_reconnect_delay = 1;
 
 static int effective_file_level(void) {
     int s = g_server_file_level, c = g_config.file_transfer_level;
@@ -634,8 +640,9 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
     (void)user;
     switch (reason) {
     case LWS_CALLBACK_CLIENT_ESTABLISHED:
-        LOG_I("[WS] Connected"); g_connected = 1; g_reconnect_delay = 1;
-        { char *a = build_auth_msg(g_config.server_key); queue_send(a); free(a); }
+        LOG_I("[WS] Connected (v2 JWT authenticated)");
+        g_connected = 1; g_authenticated = 1; g_logged_in = 1; g_reconnect_delay = 1;
+        { char *h = sc_msg_hello("windows", g_config.device_id, "2.0.0"); queue_send(h); free(h); }
         break;
 
     case LWS_CALLBACK_CLIENT_RECEIVE: {
@@ -663,27 +670,24 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         const char *type = cJSON_GetStringValue(cJSON_GetObjectItem(j, "type"));
         if (!type) { cJSON_Delete(j); break; }
 
-        if (strcmp(type, "auth_result") == 0) {
-            if (cJSON_IsTrue(cJSON_GetObjectItem(j, "success"))) {
-                g_authenticated = 1;
-                char *l = build_login_msg(g_config.username, g_config.password, g_config.device_id);
-                queue_send(l); free(l);
-            }
-        } else if (strcmp(type, "login_result") == 0) {
-            if (cJSON_IsTrue(cJSON_GetObjectItem(j, "success"))) {
-                cJSON *ftl = cJSON_GetObjectItem(j, "fileTransferLevel");
-                g_server_file_level = ftl ? (int)cJSON_GetNumberValue(ftl) : 3;
-                LOG_I("[LOGIN] OK"); g_logged_in = 1;
-            }
+        if (strcmp(type, "hello_ack") == 0) {
+            cJSON *ftl = cJSON_GetObjectItem(j, "serverFileLevel");
+            g_server_file_level = ftl ? (int)cJSON_GetNumberValue(ftl) : 3;
+            LOG_I("[WS] hello_ack serverFileLevel=%d", g_server_file_level);
+        } else if (strcmp(type, "auth_result") == 0 || strcmp(type, "login_result") == 0) {
+            /* Legacy v1 — ignore */
         } else if (strcmp(type, "clipboard") == 0) {
             const char *content = cJSON_GetStringValue(cJSON_GetObjectItem(j, "content"));
             if (content) {
                 size_t dl = 0;
-                char *dec = aes_decrypt(content, g_config.aes_key, &dl);
+                char *dec = aes_gcm_decrypt(content, g_config.aes_key, &dl);
+                if (!dec) dec = aes_decrypt(content, g_config.aes_key, &dl);
                 if (dec) {
                     g_suppress_next = 1;
                     ft_sha256((const uint8_t*)dec, strlen(dec), g_last_clip_hash);
                     clipboard_set(dec); free(dec);
+                } else {
+                    LOG_W("[CLIP] decrypt failed (key mismatch?)");
                 }
             }
         } else if (strcmp(type, "file_notify") == 0) {
@@ -1045,7 +1049,7 @@ static void on_clipboard_changed(void) {
     if (strcmp(text_hash_buf, g_last_clip_hash) == 0) { free(clip); return; }
     strcpy(g_last_clip_hash, text_hash_buf);
     LOG_I("[MONITOR] Text clipboard (%zu bytes)", strlen(clip));
-    char *enc = aes_encrypt(clip, strlen(clip), g_config.aes_key);
+    char *enc = aes_gcm_encrypt(clip, strlen(clip), g_config.aes_key);
     if (enc) { char *m = build_clipboard_msg(enc); queue_send(m); free(m); free(enc); }
     free(clip);
 }
@@ -1087,13 +1091,23 @@ static DWORD WINAPI ws_thread(LPVOID param) {
     g_context = ctx;
     while (g_running) {
         if (!g_connected && !g_wsi) {
+            /* v2: acquire JWT before WS handshake */
+            if (ws_acquire_tokens(&g_config, &g_tokens) != 0) {
+                LOG_W("[WS] Could not acquire JWT, retrying in %ds", g_reconnect_delay);
+                Sleep(g_reconnect_delay * 1000);
+                if (g_reconnect_delay < 60) g_reconnect_delay *= 2;
+                continue;
+            }
+            ws_build_bearer_protocol(g_tokens.access_token, g_ws_subproto, sizeof(g_ws_subproto));
+
             struct lws_client_connect_info conn;
             memset(&conn, 0, sizeof(conn));
             conn.context = ctx; conn.address = g_config.server_host;
-            conn.port = g_config.server_port; conn.path = g_config.server_path;
+            conn.port = g_config.server_port; conn.path = "/ws/v2/clipboard";
             conn.host = g_config.server_host; conn.origin = g_config.server_host;
-            conn.protocol = protocols[0].name;
+            conn.protocol = g_ws_subproto;
             conn.retry_and_idle_policy = &ws_retry;
+            LOG_I("[WS] Connecting to %s:%d/ws/v2/clipboard", g_config.server_host, g_config.server_port);
             g_wsi = lws_client_connect_via_info(&conn);
             if (!g_wsi) {
                 Sleep(g_reconnect_delay * 1000);

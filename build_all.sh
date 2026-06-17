@@ -10,7 +10,8 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 JAVA_HOME="/home/joe/App/java/jdk17"
-ANDROID_HOME="${ANDROID_HOME:-/home/joe/Android/Sdk}"
+ANDROID_HOME="${ANDROID_HOME:-/home/joe/App/android-sdk}"
+GRADLE_BIN="${GRADLE_BIN:-/home/joe/App/gradle-8.5/bin/gradle}"
 MVN_BIN="/home/joe/App/maven/apache-maven-3.9.5/bin/mvn"
 MVN_SETTINGS="/home/joe/App/maven/settings.xml"
 WIN64_PREFIX="$SCRIPT_DIR/windows/deps/win64"
@@ -57,8 +58,14 @@ build_windows() {
     fi
 
     if [ ! -f "$WIN64_PREFIX/lib/libwebsockets_static.a" ]; then
-        echo -e "${RED}  ✘ Windows 依赖库未编译，跳过 (先运行 build_windows_deps.sh)${NC}"
-        record "Windows:   SKIP (no deps)"
+        echo -e "${RED}  ✘ Windows libwebsockets 依赖未编译，跳过 (先运行 build_windows_deps.sh)${NC}"
+        record "Windows:   SKIP (no lws deps)"
+        return
+    fi
+
+    if [ ! -f "$WIN64_PREFIX/lib/libcurl.a" ]; then
+        echo -e "${RED}  ✘ Windows libcurl 依赖未编译，跳过 (先运行 build_windows_deps.sh)${NC}"
+        record "Windows:   SKIP (no curl deps)"
         return
     fi
 
@@ -67,18 +74,30 @@ build_windows() {
     x86_64-w64-mingw32-gcc -std=c11 \
         -I"$WIN64_PREFIX/include" \
         -I"$SCRIPT_DIR/common" \
+        -DCURL_STATICLIB \
         -o build/sync_clipboard.exe \
         main.c \
         ../common/config.c \
         ../common/crypto.c \
         ../common/cJSON.c \
-        ../common/file_transfer.c \
+        ../common/ft/ft_socket.c \
+        ../common/ft/ft_addr.c \
+        ../common/ft/ft_lan.c \
+        ../common/ft/ft_nat.c \
+        ../common/ft/ft_proto.c \
+        ../common/ft/ft_b64_sha.c \
+        ../common/ft/ft_auth.c \
+        ../common/log.c \
+        ../common/codec.c \
+        ../common/auth_http.c \
+        ../common/ws_client.c \
+        ../common/msg.c \
         ../common/stb_impl.c \
         -L"$WIN64_PREFIX/lib" \
         -L"$WIN64_PREFIX/lib64" \
-        -lwebsockets_static -lssl -lcrypto \
-        -lws2_32 -lgdi32 -lcrypt32 -liphlpapi -lpthread -lshlwapi -lshell32 \
-        -static -mwindows 2>/dev/null
+        -lwebsockets_static -lcurl -lssl -lcrypto \
+        -lws2_32 -lwldap32 -lgdi32 -lcrypt32 -lbcrypt -liphlpapi -lpthread -lshlwapi -lshell32 \
+        -static -mwindows
 
     echo -e "${GREEN}  ✔ windows/build/sync_clipboard.exe${NC}"
     record "Windows:   OK"
@@ -91,14 +110,20 @@ build_android() {
     echo -e "${YELLOW}[4/4] 编译 Android Client (Gradle)...${NC}"
     cd "$SCRIPT_DIR/android"
 
-    if [ ! -f gradlew ]; then
-        echo -e "${RED}  ✘ 缺少 gradlew，跳过${NC}"
-        record "Android:   SKIP (no gradlew)"
+    if [ ! -d "$ANDROID_HOME" ]; then
+        echo -e "${RED}  ✘ ANDROID_HOME 不存在 ($ANDROID_HOME)，跳过${NC}"
+        record "Android:   SKIP (no SDK)"
         return
     fi
 
-    chmod +x gradlew
-    ./gradlew assembleDebug -q
+    if [ ! -x "$GRADLE_BIN" ]; then
+        echo -e "${RED}  ✘ 找不到 gradle ($GRADLE_BIN)，跳过${NC}"
+        record "Android:   SKIP (no gradle)"
+        return
+    fi
+
+    # 直接用本地 gradle 跑，避免 gradle-wrapper.jar 缺失问题。
+    "$GRADLE_BIN" -q assembleDebug
     echo -e "${GREEN}  ✔ android/app/build/outputs/apk/debug/app-debug.apk${NC}"
     record "Android:   OK"
 }

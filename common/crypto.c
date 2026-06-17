@@ -1,4 +1,5 @@
 #include "crypto.h"
+#include "codec.h"
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/bio.h>
@@ -150,4 +151,105 @@ char *aes_decrypt(const char *b64_input, const char *key_hex, size_t *out_len) {
     plaintext[plen] = '\0';
     if (out_len) *out_len = (size_t)plen;
     return (char *)plaintext;
+}
+
+/* ==== AES-256-GCM (v2 cipher) ==== */
+
+#define GCM_NONCE_LEN 12
+#define GCM_TAG_LEN   16
+#define GCM_VERSION   0x02
+
+char *aes_gcm_encrypt(const char *plaintext, size_t plain_len, const char *key_hex) {
+    unsigned char key[AES_KEY_LEN];
+    if (sc_hex_to_bytes(key_hex, key, AES_KEY_LEN) != 0) return NULL;
+
+    unsigned char nonce[GCM_NONCE_LEN];
+    if (RAND_bytes(nonce, GCM_NONCE_LEN) != 1) return NULL;
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return NULL;
+
+    char *result = NULL;
+    unsigned char *ct = NULL;
+    unsigned char *frame = NULL;
+
+    do {
+        if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) break;
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_NONCE_LEN, NULL) != 1) break;
+        if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) break;
+
+        ct = (unsigned char *)malloc(plain_len + 16);
+        if (!ct) break;
+        int out_len = 0, final_len = 0;
+        if (EVP_EncryptUpdate(ctx, ct, &out_len,
+                              (const unsigned char *)plaintext, (int)plain_len) != 1) break;
+        if (EVP_EncryptFinal_ex(ctx, ct + out_len, &final_len) != 1) break;
+        out_len += final_len;
+
+        unsigned char tag[GCM_TAG_LEN];
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_LEN, tag) != 1) break;
+
+        size_t frame_len = 1 + GCM_NONCE_LEN + (size_t)out_len + GCM_TAG_LEN;
+        frame = (unsigned char *)malloc(frame_len);
+        if (!frame) break;
+        frame[0] = GCM_VERSION;
+        memcpy(frame + 1, nonce, GCM_NONCE_LEN);
+        memcpy(frame + 1 + GCM_NONCE_LEN, ct, (size_t)out_len);
+        memcpy(frame + 1 + GCM_NONCE_LEN + (size_t)out_len, tag, GCM_TAG_LEN);
+
+        result = sc_base64_encode(frame, frame_len);
+    } while (0);
+
+    EVP_CIPHER_CTX_free(ctx);
+    free(ct);
+    free(frame);
+    return result;
+}
+
+char *aes_gcm_decrypt(const char *b64_input, const char *key_hex, size_t *out_len) {
+    unsigned char key[AES_KEY_LEN];
+    if (sc_hex_to_bytes(key_hex, key, AES_KEY_LEN) != 0) return NULL;
+
+    size_t frame_len = 0;
+    unsigned char *frame = sc_base64_decode(b64_input, &frame_len);
+    if (!frame) return NULL;
+
+    char *plaintext = NULL;
+    if (frame_len < 1 + GCM_NONCE_LEN + GCM_TAG_LEN) goto cleanup;
+    if (frame[0] != GCM_VERSION) goto cleanup;
+
+    size_t ct_len = frame_len - 1 - GCM_NONCE_LEN - GCM_TAG_LEN;
+    unsigned char *nonce = frame + 1;
+    unsigned char *ct = frame + 1 + GCM_NONCE_LEN;
+    unsigned char *tag = frame + 1 + GCM_NONCE_LEN + ct_len;
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) goto cleanup;
+
+    do {
+        if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) break;
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_NONCE_LEN, NULL) != 1) break;
+        if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) break;
+
+        plaintext = (char *)malloc(ct_len + 1);
+        if (!plaintext) break;
+        int plen = 0, flen = 0;
+        if (EVP_DecryptUpdate(ctx, (unsigned char *)plaintext, &plen, ct, (int)ct_len) != 1) {
+            free(plaintext); plaintext = NULL; break;
+        }
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN, tag) != 1) {
+            free(plaintext); plaintext = NULL; break;
+        }
+        if (EVP_DecryptFinal_ex(ctx, (unsigned char *)plaintext + plen, &flen) != 1) {
+            free(plaintext); plaintext = NULL; break;
+        }
+        plen += flen;
+        plaintext[plen] = '\0';
+        if (out_len) *out_len = (size_t)plen;
+    } while (0);
+
+    EVP_CIPHER_CTX_free(ctx);
+cleanup:
+    free(frame);
+    return plaintext;
 }

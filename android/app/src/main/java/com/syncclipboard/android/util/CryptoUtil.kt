@@ -1,6 +1,7 @@
 package com.syncclipboard.android.util
 
 import android.util.Base64
+import android.util.Log
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -8,6 +9,7 @@ import javax.crypto.spec.SecretKeySpec
 
 object CryptoUtil {
 
+    private const val TAG = "CryptoUtil"
     private const val AES_ALGORITHM = "AES/CBC/PKCS5Padding"
     private const val IV_LENGTH = 16
 
@@ -51,7 +53,7 @@ object CryptoUtil {
             cipher.init(Cipher.DECRYPT_MODE, key, IvParameterSpec(iv))
             String(cipher.doFinal(ciphertext), Charsets.UTF_8)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.w(TAG, "decrypt failed: ${e.javaClass.simpleName}")
             null
         }
     }

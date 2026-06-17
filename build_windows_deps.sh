@@ -75,5 +75,36 @@ else
     echo -e "${GREEN}[2/2] libwebsockets 已存在，跳过${NC}"
 fi
 
+# ---- libcurl ----
+CURL_VER="8.7.1"
+if [ ! -f "$PREFIX/lib/libcurl.a" ]; then
+    echo -e "${YELLOW}[3/3] 编译 libcurl ${CURL_VER} for Windows...${NC}"
+    if [ ! -d "curl-${CURL_VER}" ]; then
+        curl -sL "https://curl.se/download/curl-${CURL_VER}.tar.gz" -o curl.tar.gz
+        tar xzf curl.tar.gz
+    fi
+    cd "curl-${CURL_VER}"
+    LIBS="-lcrypt32" ./configure \
+        --host=x86_64-w64-mingw32 \
+        --prefix="$PREFIX" \
+        --with-openssl="$PREFIX" \
+        --disable-shared --enable-static \
+        --disable-ldap --disable-ldaps \
+        --without-libpsl \
+        --without-libidn2 \
+        --without-zstd \
+        --without-brotli \
+        --without-zlib \
+        --without-nghttp2 \
+        --without-libssh2 \
+        > /dev/null 2>&1
+    make -j"$(nproc)" > /dev/null 2>&1
+    make install > /dev/null 2>&1
+    cd "$DEPS_DIR"
+    echo -e "${GREEN}  ✔ libcurl 编译完成${NC}"
+else
+    echo -e "${GREEN}[3/3] libcurl 已存在，跳过${NC}"
+fi
+
 echo ""
 echo -e "${GREEN}Windows 依赖编译完成，产物目录: $PREFIX${NC}"

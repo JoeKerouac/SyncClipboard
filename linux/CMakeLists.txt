@@ -8,14 +8,26 @@ pkg_check_modules(LWS REQUIRED libwebsockets)
 pkg_check_modules(OPENSSL REQUIRED openssl)
 pkg_check_modules(X11 REQUIRED x11)
 pkg_check_modules(XFIXES REQUIRED xfixes)
+pkg_check_modules(CURL REQUIRED libcurl)
 
 add_executable(sync_clipboard
     main.c
     ../common/config.c
     ../common/crypto.c
     ../common/cJSON.c
-    ../common/file_transfer.c
+    ../common/ft/ft_socket.c
+    ../common/ft/ft_addr.c
+    ../common/ft/ft_lan.c
+    ../common/ft/ft_nat.c
+    ../common/ft/ft_proto.c
+    ../common/ft/ft_b64_sha.c
+    ../common/ft/ft_auth.c
     ../common/stb_impl.c
+    ../common/log.c
+    ../common/codec.c
+    ../common/auth_http.c
+    ../common/ws_client.c
+    ../common/msg.c
 )
 
 target_include_directories(sync_clipboard PRIVATE
@@ -24,6 +36,7 @@ target_include_directories(sync_clipboard PRIVATE
     ${OPENSSL_INCLUDE_DIRS}
     ${X11_INCLUDE_DIRS}
     ${XFIXES_INCLUDE_DIRS}
+    ${CURL_INCLUDE_DIRS}
 )
 
 target_link_directories(sync_clipboard PRIVATE
@@ -31,6 +44,7 @@ target_link_directories(sync_clipboard PRIVATE
     ${OPENSSL_LIBRARY_DIRS}
     ${X11_LIBRARY_DIRS}
     ${XFIXES_LIBRARY_DIRS}
+    ${CURL_LIBRARY_DIRS}
 )
 
 target_link_libraries(sync_clipboard
@@ -38,6 +52,7 @@ target_link_libraries(sync_clipboard
     ${OPENSSL_LIBRARIES}
     ${X11_LIBRARIES}
     ${XFIXES_LIBRARIES}
+    ${CURL_LIBRARIES}
     pthread
     m
 )

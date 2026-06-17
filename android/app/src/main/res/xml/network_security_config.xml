@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network security policy.
+    Default: cleartext allowed (so users can run without TLS).
+    RECOMMENDED: Deploy server with TLS (gen-self-signed.sh) and set
+    cleartextTrafficPermitted="false" in production builds.
+    If you need to restrict to TLS-only, change base-config to false and
+    add self-signed CA under <trust-anchors>.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

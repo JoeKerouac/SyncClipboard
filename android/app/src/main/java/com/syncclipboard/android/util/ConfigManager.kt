@@ -1,59 +1,69 @@
 package com.syncclipboard.android.util
 
 import android.content.Context
-import android.content.SharedPreferences
+import com.syncclipboard.android.App
+import com.syncclipboard.android.data.SecureConfigStore
 
+/**
+ * Backwards-compatible facade over [SecureConfigStore]. Existing code that
+ * still references ConfigManager keeps working while UI pieces migrate to
+ * the new store. New code should depend on SecureConfigStore directly via
+ * [App.secureConfig].
+ */
 class ConfigManager(context: Context) {
 
-    private val prefs: SharedPreferences =
-        context.getSharedPreferences("sync_clipboard_config", Context.MODE_PRIVATE)
+    private val store: SecureConfigStore = try {
+        App.secureConfig
+    } catch (_: UninitializedPropertyAccessException) {
+        SecureConfigStore(context.applicationContext)
+    }
 
     var serverHost: String
-        get() = prefs.getString("server_host", "10.0.2.2") ?: "10.0.2.2"
-        set(value) = prefs.edit().putString("server_host", value).apply()
+        get() = store.serverHost
+        set(v) { store.serverHost = v }
 
     var serverPort: Int
-        get() = prefs.getInt("server_port", 8080)
-        set(value) = prefs.edit().putInt("server_port", value).apply()
+        get() = store.serverPort
+        set(v) { store.serverPort = v }
 
     var serverPath: String
-        get() = prefs.getString("server_path", "/ws/clipboard") ?: "/ws/clipboard"
-        set(value) = prefs.edit().putString("server_path", value).apply()
+        get() = store.serverPath
+        set(v) { store.serverPath = v }
 
+    /** v2 has no server-key concept; kept as alias for UI compatibility. */
     var serverKey: String
-        get() = prefs.getString("server_key", "my-secret-server-key") ?: "my-secret-server-key"
-        set(value) = prefs.edit().putString("server_key", value).apply()
+        get() = ""
+        set(_) {}
 
     var username: String
-        get() = prefs.getString("username", "admin") ?: "admin"
-        set(value) = prefs.edit().putString("username", value).apply()
+        get() = store.username
+        set(v) { store.username = v }
 
     var password: String
-        get() = prefs.getString("password", "admin123") ?: "admin123"
-        set(value) = prefs.edit().putString("password", value).apply()
+        get() = store.password
+        set(v) { store.password = v }
 
     var aesKey: String
-        get() = prefs.getString("aes_key",
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-            ?: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        set(value) = prefs.edit().putString("aes_key", value).apply()
+        get() = store.aesKey
+        set(v) { store.aesKey = v }
 
     var deviceId: String
-        get() = prefs.getString("device_id", "android-device-01") ?: "android-device-01"
-        set(value) = prefs.edit().putString("device_id", value).apply()
+        get() = store.deviceId
+        set(v) { store.deviceId = v }
 
     var lastWsStatus: String
-        get() = prefs.getString("last_ws_status", "") ?: ""
-        set(value) = prefs.edit().putString("last_ws_status", value).apply()
+        get() = store.lastWsStatus
+        set(v) { store.lastWsStatus = v }
 
     var fileTransferLevel: Int
-        get() = prefs.getInt("file_transfer_level", 3)
-        set(value) = prefs.edit().putInt("file_transfer_level", value).apply()
+        get() = store.fileTransferLevel
+        set(v) { store.fileTransferLevel = v }
 
-    /** P2P (LAN/NAT) 最大传输大小 MB */
     var maxTransferSizeMb: Int
-        get() = prefs.getInt("max_transfer_size_mb", 500)
-        set(value) = prefs.edit().putInt("max_transfer_size_mb", value).apply()
+        get() = store.maxTransferSizeMb
+        set(v) { store.maxTransferSizeMb = v }
 
-    fun getWebSocketUrl(): String = "ws://$serverHost:$serverPort$serverPath"
+    fun isConfigured(): Boolean = store.isConfigured()
+
+    fun getWebSocketUrl(): String = store.webSocketUrl()
 }
