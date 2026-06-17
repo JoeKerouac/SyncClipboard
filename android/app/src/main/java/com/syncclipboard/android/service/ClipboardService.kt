@@ -118,22 +118,37 @@ class ClipboardService : Service(), FileTransferManager.Listener {
     private suspend fun observeState() {
         connection.state.collectLatest { state ->
             when (state) {
-                ConnectionManager.State.CONNECTING -> broadcastStatus(STATUS_CONNECTING)
+                ConnectionManager.State.CONNECTING -> {
+                    updateNotification("正在连接...")
+                    broadcastStatus(STATUS_CONNECTING)
+                }
                 ConnectionManager.State.CONNECTED -> {
                     loggedIn = true
+                    updateNotification("已连接")
                     broadcastStatus(STATUS_LOGGED_IN)
                 }
                 ConnectionManager.State.DISCONNECTED -> {
                     loggedIn = false
+                    updateNotification("已断开，正在重连...")
                     broadcastStatus(STATUS_DISCONNECTED)
                 }
                 ConnectionManager.State.AUTH_FAILED -> {
                     loggedIn = false
+                    updateNotification("认证失败，请检查账号密码")
                     broadcastStatus(STATUS_AUTH_FAIL)
                 }
-                ConnectionManager.State.IDLE -> { /* not started */ }
+                ConnectionManager.State.IDLE -> {
+                    updateNotification("未启动")
+                }
             }
         }
+    }
+
+    private fun updateNotification(text: String) {
+        try {
+            val mgr = getSystemService(NotificationManager::class.java)
+            mgr.notify(NOTIFICATION_ID, buildNotification(text))
+        } catch (_: Exception) { /* best-effort */ }
     }
 
     private suspend fun observeIncoming() {

@@ -2,31 +2,28 @@ package com.syncclipboard.android.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
-import android.content.BroadcastReceiver
 import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import androidx.core.content.ContextCompat
 import com.syncclipboard.android.util.AppLog
 
 /**
  * Accessibility service for clipboard detection only.
  * Does NOT manage WebSocket connections — all network operations
  * are delegated to ClipboardService via its static instance.
+ *
+ * 仅依赖被动回调：OnPrimaryClipChangedListener + AccessibilityEvent。
+ * 已移除主动轮询，避免在 Android 12+ 触发"xxx 已访问剪贴板"系统横幅。
  */
 class ClipboardAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "ClipboardA11y"
         private const val READER_COOLDOWN_MS = 2000L
-        private const val POLL_INTERVAL_MS = 3000L
 
         @Volatile
         var isRunning = false
@@ -38,7 +35,6 @@ class ClipboardAccessibilityService : AccessibilityService() {
     }
 
     private lateinit var clipboardManager: ClipboardManager
-    private lateinit var powerManager: PowerManager
     private var lastClipHash = ""
     private var lastReaderLaunchTime = 0L
     private val handler = Handler(Looper.getMainLooper())
@@ -48,36 +44,11 @@ class ClipboardAccessibilityService : AccessibilityService() {
         onClipboardChanged("LISTENER")
     }
 
-    private val pollRunnable = object : Runnable {
-        override fun run() {
-            pollClipboard()
-            if (isRunning && powerManager.isInteractive) {
-                handler.postDelayed(this, POLL_INTERVAL_MS)
-            }
-        }
-    }
-
-    private val screenReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                Intent.ACTION_SCREEN_OFF -> {
-                    AppLog.d(TAG, "[SCREEN] off, pause poll")
-                    handler.removeCallbacks(pollRunnable)
-                }
-                Intent.ACTION_SCREEN_ON -> {
-                    AppLog.d(TAG, "[SCREEN] on, resume poll")
-                    handler.postDelayed(pollRunnable, POLL_INTERVAL_MS)
-                }
-            }
-        }
-    }
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         isRunning = true
         clipboardManager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        powerManager = getSystemService(POWER_SERVICE) as PowerManager
 
         serviceInfo = serviceInfo.apply {
             eventTypes = AccessibilityEvent.TYPE_ANNOUNCEMENT or
@@ -88,15 +59,7 @@ class ClipboardAccessibilityService : AccessibilityService() {
         }
 
         clipboardManager.addPrimaryClipChangedListener(clipListener)
-
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_SCREEN_ON)
-        }
-        ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
-
-        handler.postDelayed(pollRunnable, POLL_INTERVAL_MS)
-        AppLog.i(TAG, "无障碍服务已启动 (仅剪切板检测，不管理连接)")
+        AppLog.i(TAG, "无障碍服务已启动 (被动监听模式)")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -119,6 +82,8 @@ class ClipboardAccessibilityService : AccessibilityService() {
         ) {
             AppLog.d(TAG, "[EVENT] 检测到复制/剪切事件: \"$texts\"")
             handler.postDelayed({
+                // 优先从无障碍节点选区读取，避免读 primaryClip 触发隐私横幅
+                if (readSelectedTextFromWindow()) return@postDelayed
                 val directClip = try { clipboardManager.primaryClip } catch (_: Exception) { null }
                 if (directClip != null && directClip.itemCount > 0) {
                     val text = directClip.getItemAt(0).text?.toString()
@@ -127,7 +92,6 @@ class ClipboardAccessibilityService : AccessibilityService() {
                         return@postDelayed
                     }
                 }
-                if (readSelectedTextFromWindow()) return@postDelayed
                 launchClipboardReader("EVENT")
             }, 150)
         }
@@ -139,8 +103,7 @@ class ClipboardAccessibilityService : AccessibilityService() {
         instance = null
         isRunning = false
         handler.removeCallbacksAndMessages(null)
-        clipboardManager.removePrimaryClipChangedListener(clipListener)
-        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+        try { clipboardManager.removePrimaryClipChangedListener(clipListener) } catch (_: Exception) {}
         AppLog.i(TAG, "无障碍服务已停止")
         super.onDestroy()
     }
@@ -167,19 +130,6 @@ class ClipboardAccessibilityService : AccessibilityService() {
         } catch (e: SecurityException) {
             if (!readSelectedTextFromWindow()) {
                 launchClipboardReader(source)
-            }
-        } catch (_: Exception) {}
-    }
-
-    private fun pollClipboard() {
-        try {
-            val clip = clipboardManager.primaryClip ?: return
-            if (clip.itemCount == 0) return
-            val text = clip.getItemAt(0).text?.toString()
-            if (text.isNullOrEmpty()) return
-            val hash = text.hashCode().toString()
-            if (hash != lastClipHash) {
-                forwardToClipboardService(text, "POLL")
             }
         } catch (_: Exception) {}
     }
