@@ -15,13 +15,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.resume
 
 /**
  * Process-wide WebSocket lifecycle. Owns the single OkHttpClient instance,
@@ -114,19 +117,20 @@ class ConnectionManager(private val store: SecureConfigStore) {
         }
     }
 
-    private suspend fun openSocket(token: String): Boolean {
+    private suspend fun openSocket(token: String): Boolean = suspendCancellableCoroutine { cont ->
         val url = store.webSocketUrl()
         val request = Request.Builder()
             .url(url)
             .addHeader("Sec-WebSocket-Protocol", "bearer.$token")
             .build()
+        val resumed = AtomicBoolean(false)
         val listener = object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 AppLog.i(TAG, "socket open code=${response.code}")
                 _state.value = State.CONNECTED
-                // Send hello immediately to keep connection active and announce client.
                 val hello = "{\"type\":\"hello\",\"v\":2,\"clientType\":\"android\",\"deviceId\":\"${store.deviceId}\",\"appVersion\":\"2.0.0\",\"capabilities\":[\"clipboard\",\"file_lan\",\"file_nat\",\"file_relay\"]}"
                 ws.send(hello)
+                if (resumed.compareAndSet(false, true)) cont.resume(true)
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
@@ -138,10 +142,10 @@ class ConnectionManager(private val store: SecureConfigStore) {
                 socketRef.compareAndSet(ws, null)
                 _state.value = if (response?.code == 401) State.AUTH_FAILED else State.DISCONNECTED
                 if (response?.code == 401) {
-                    // Force token refresh on next attempt.
                     store.accessToken = ""
                     store.accessTokenExpEpoch = 0L
                 }
+                if (resumed.compareAndSet(false, true)) cont.resume(false)
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
@@ -152,12 +156,15 @@ class ConnectionManager(private val store: SecureConfigStore) {
                 AppLog.i(TAG, "socket closed $code/$reason")
                 socketRef.compareAndSet(ws, null)
                 _state.value = State.DISCONNECTED
+                if (resumed.compareAndSet(false, true)) cont.resume(false)
             }
         }
         socketRef.getAndSet(null)?.cancel()
         val ws = httpClient.newWebSocket(request, listener)
         socketRef.set(ws)
-        return true
+        cont.invokeOnCancellation {
+            ws.cancel()
+        }
     }
 
     private fun backoffMs(attempt: Int): Long {

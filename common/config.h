@@ -19,6 +19,8 @@ typedef struct {
     int  file_transfer_level;     /* 0=off, 1=LAN, 2=+NAT, 3=+relay(full) */
     int  max_transfer_size;       /* 文件传输最大大小，单位MB */
     int  use_tls;                 /* 0=http/ws, 1=https/wss */
+    char ca_cert_path[MAX_PATH_LEN]; /* CA cert for TLS verification (self-signed) */
+    int  skip_tls_verify;         /* 1=skip TLS cert verification (dev only) */
     int  log_level;               /* 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR */
     int  max_log_size_mb;         /* 单个日志文件最大MB, 超过自动滚动 */
 } ClientConfig;

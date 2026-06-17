@@ -30,7 +30,7 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     return total;
 }
 
-static int post_json(const char *url, const char *body, HttpBuf *out, long *http_code) {
+static int post_json(const ClientConfig *cfg, const char *url, const char *body, HttpBuf *out, long *http_code) {
     CURL *curl = curl_easy_init();
     if (!curl) return -1;
 
@@ -48,6 +48,15 @@ static int post_json(const char *url, const char *body, HttpBuf *out, long *http
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    if (cfg->use_tls) {
+        if (cfg->skip_tls_verify) {
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        } else if (cfg->ca_cert_path[0]) {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, cfg->ca_cert_path);
+        }
+    }
 
     CURLcode rc = curl_easy_perform(curl);
     if (http_code) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_code);
@@ -103,7 +112,7 @@ int auth_http_login(const ClientConfig *cfg, AuthTokens *out) {
 
     HttpBuf buf;
     long http_code = 0;
-    int rc = post_json(url, body_str, &buf, &http_code);
+    int rc = post_json(cfg, url, body_str, &buf, &http_code);
     free(body_str);
     if (rc != 0) return -1;
 
@@ -133,7 +142,7 @@ int auth_http_refresh(const ClientConfig *cfg, AuthTokens *out) {
 
     HttpBuf buf;
     long http_code = 0;
-    int rc = post_json(url, body_str, &buf, &http_code);
+    int rc = post_json(cfg, url, body_str, &buf, &http_code);
     free(body_str);
     if (rc != 0) return -1;
 

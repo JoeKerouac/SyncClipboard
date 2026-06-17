@@ -56,7 +56,7 @@ public class UserService {
                 users.put(key, props.getProperty(key));
             }
         } catch (IOException e) {
-            log.error("加载用户文件失败: {}", e.getMessage());
+            log.error("Failed to load users file: {}", e.getMessage());
             return;
         }
 
@@ -81,7 +81,7 @@ public class UserService {
      * (against a dummy hash for unknown users) so callers cannot use timing
      * to enumerate usernames.
      */
-    public boolean authenticate(String username, String password) {
+    public synchronized boolean authenticate(String username, String password) {
         if (username == null || password == null) {
             encoder.matches("dummy", DUMMY_HASH);
             return false;
@@ -130,7 +130,7 @@ public class UserService {
         File file = new File(usersFile);
         File parent = file.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
-            log.error("无法创建用户文件目录: {}", parent.getAbsolutePath());
+            log.error("Failed to create users file directory: {}", parent.getAbsolutePath());
             return;
         }
         try (OutputStream os = new FileOutputStream(file)) {
@@ -138,7 +138,7 @@ public class UserService {
             props.putAll(users);
             props.store(os, "SyncClipboard Users");
         } catch (IOException e) {
-            log.error("保存用户文件失败: {}", e.getMessage());
+            log.error("Failed to save users file: {}", e.getMessage());
             return;
         }
         restrictPermissions(file.toPath());

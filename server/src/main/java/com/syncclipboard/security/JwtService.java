@@ -20,7 +20,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Date;
-import java.util.Set;
 
 /**
  * JWT signing and verification. The signing secret is persisted to
@@ -56,7 +55,7 @@ public class JwtService {
             this.signingKey = Keys.hmacShaKeyFor(decoded);
             log.info("Loaded JWT signing key from {}", keyFile.toAbsolutePath());
         } else {
-            byte[] bytes = new byte[64];
+            byte[] bytes = new byte[32];
             new SecureRandom().nextBytes(bytes);
             this.signingKey = Keys.hmacShaKeyFor(bytes);
             Files.createDirectories(keyFile.getParent());
@@ -110,9 +109,6 @@ public class JwtService {
                     .build()
                     .parseSignedClaims(token)
                     .getPayload();
-            if (!Set.of(KIND_ACCESS, KIND_REFRESH).contains(claims.get(CLAIM_KIND, String.class))) {
-                return null;
-            }
             String kind = claims.get(CLAIM_KIND, String.class);
             if (!expectedKind.equals(kind)) return null;
             return new ParsedToken(

@@ -73,16 +73,18 @@ char *aes_encrypt(const char *plaintext, size_t plain_len, const char *key_hex) 
     RAND_bytes(iv, AES_IV_LEN);
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return NULL;
+    if (!ctx) { OPENSSL_cleanse(key, sizeof(key)); OPENSSL_cleanse(iv, sizeof(iv)); return NULL; }
 
     if (EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv) != 1) {
         EVP_CIPHER_CTX_free(ctx);
+        OPENSSL_cleanse(key, sizeof(key));
+        OPENSSL_cleanse(iv, sizeof(iv));
         return NULL;
     }
 
     int max_out = (int)plain_len + EVP_CIPHER_block_size(EVP_aes_256_cbc());
     unsigned char *ciphertext = (unsigned char *)malloc(max_out);
-    if (!ciphertext) { EVP_CIPHER_CTX_free(ctx); return NULL; }
+    if (!ciphertext) { EVP_CIPHER_CTX_free(ctx); OPENSSL_cleanse(key, sizeof(key)); OPENSSL_cleanse(iv, sizeof(iv)); return NULL; }
 
     int out_len = 0, final_len = 0;
     EVP_EncryptUpdate(ctx, ciphertext, &out_len, (const unsigned char *)plaintext, (int)plain_len);
@@ -93,13 +95,15 @@ char *aes_encrypt(const char *plaintext, size_t plain_len, const char *key_hex) 
     /* prepend IV to ciphertext: IV(16) + ciphertext */
     int total = AES_IV_LEN + out_len;
     unsigned char *combined = (unsigned char *)malloc(total);
-    if (!combined) { free(ciphertext); return NULL; }
+    if (!combined) { free(ciphertext); OPENSSL_cleanse(key, sizeof(key)); OPENSSL_cleanse(iv, sizeof(iv)); return NULL; }
     memcpy(combined, iv, AES_IV_LEN);
     memcpy(combined + AES_IV_LEN, ciphertext, out_len);
     free(ciphertext);
 
     char *b64 = base64_encode(combined, total);
     free(combined);
+    OPENSSL_cleanse(key, sizeof(key));
+    OPENSSL_cleanse(iv, sizeof(iv));
     return b64;
 }
 
@@ -120,26 +124,29 @@ char *aes_decrypt(const char *b64_input, const char *key_hex, size_t *out_len) {
     int cipher_len = decoded_len - AES_IV_LEN;
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) { free(decoded); return NULL; }
+    if (!ctx) { OPENSSL_cleanse(key, sizeof(key)); free(decoded); return NULL; }
 
     if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv) != 1) {
         EVP_CIPHER_CTX_free(ctx);
+        OPENSSL_cleanse(key, sizeof(key));
         free(decoded);
         return NULL;
     }
 
     unsigned char *plaintext = (unsigned char *)malloc(cipher_len + 1);
-    if (!plaintext) { EVP_CIPHER_CTX_free(ctx); free(decoded); return NULL; }
+    if (!plaintext) { EVP_CIPHER_CTX_free(ctx); OPENSSL_cleanse(key, sizeof(key)); free(decoded); return NULL; }
 
     int plen = 0, flen = 0;
     if (EVP_DecryptUpdate(ctx, plaintext, &plen, ciphertext, cipher_len) != 1) {
         EVP_CIPHER_CTX_free(ctx);
+        OPENSSL_cleanse(key, sizeof(key));
         free(decoded);
         free(plaintext);
         return NULL;
     }
     if (EVP_DecryptFinal_ex(ctx, plaintext + plen, &flen) != 1) {
         EVP_CIPHER_CTX_free(ctx);
+        OPENSSL_cleanse(key, sizeof(key));
         free(decoded);
         free(plaintext);
         return NULL;
@@ -150,6 +157,7 @@ char *aes_decrypt(const char *b64_input, const char *key_hex, size_t *out_len) {
 
     plaintext[plen] = '\0';
     if (out_len) *out_len = (size_t)plen;
+    OPENSSL_cleanse(key, sizeof(key));
     return (char *)plaintext;
 }
 
@@ -161,13 +169,23 @@ char *aes_decrypt(const char *b64_input, const char *key_hex, size_t *out_len) {
 
 char *aes_gcm_encrypt(const char *plaintext, size_t plain_len, const char *key_hex) {
     unsigned char key[AES_KEY_LEN];
-    if (sc_hex_to_bytes(key_hex, key, AES_KEY_LEN) != 0) return NULL;
+    if (sc_hex_to_bytes(key_hex, key, AES_KEY_LEN) != 0) {
+        OPENSSL_cleanse(key, sizeof(key));
+        return NULL;
+    }
 
     unsigned char nonce[GCM_NONCE_LEN];
-    if (RAND_bytes(nonce, GCM_NONCE_LEN) != 1) return NULL;
+    if (RAND_bytes(nonce, GCM_NONCE_LEN) != 1) {
+        OPENSSL_cleanse(key, sizeof(key));
+        return NULL;
+    }
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return NULL;
+    if (!ctx) {
+        OPENSSL_cleanse(key, sizeof(key));
+        OPENSSL_cleanse(nonce, sizeof(nonce));
+        return NULL;
+    }
 
     char *result = NULL;
     unsigned char *ct = NULL;
@@ -201,6 +219,8 @@ char *aes_gcm_encrypt(const char *plaintext, size_t plain_len, const char *key_h
     } while (0);
 
     EVP_CIPHER_CTX_free(ctx);
+    OPENSSL_cleanse(key, sizeof(key));
+    OPENSSL_cleanse(nonce, sizeof(nonce));
     free(ct);
     free(frame);
     return result;
@@ -208,11 +228,17 @@ char *aes_gcm_encrypt(const char *plaintext, size_t plain_len, const char *key_h
 
 char *aes_gcm_decrypt(const char *b64_input, const char *key_hex, size_t *out_len) {
     unsigned char key[AES_KEY_LEN];
-    if (sc_hex_to_bytes(key_hex, key, AES_KEY_LEN) != 0) return NULL;
+    if (sc_hex_to_bytes(key_hex, key, AES_KEY_LEN) != 0) {
+        OPENSSL_cleanse(key, sizeof(key));
+        return NULL;
+    }
 
     size_t frame_len = 0;
     unsigned char *frame = sc_base64_decode(b64_input, &frame_len);
-    if (!frame) return NULL;
+    if (!frame) {
+        OPENSSL_cleanse(key, sizeof(key));
+        return NULL;
+    }
 
     char *plaintext = NULL;
     if (frame_len < 1 + GCM_NONCE_LEN + GCM_TAG_LEN) goto cleanup;
@@ -250,6 +276,7 @@ char *aes_gcm_decrypt(const char *b64_input, const char *key_hex, size_t *out_le
 
     EVP_CIPHER_CTX_free(ctx);
 cleanup:
+    OPENSSL_cleanse(key, sizeof(key));
     free(frame);
     return plaintext;
 }

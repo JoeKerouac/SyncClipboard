@@ -82,6 +82,10 @@ int config_load(const char *path, ClientConfig *cfg) {
             cfg->max_transfer_size = atoi(val);
         else if (strcmp(key, "use_tls") == 0)
             cfg->use_tls = atoi(val);
+        else if (strcmp(key, "ca_cert_path") == 0)
+            strncpy(cfg->ca_cert_path, val, MAX_PATH_LEN - 1);
+        else if (strcmp(key, "skip_tls_verify") == 0)
+            cfg->skip_tls_verify = atoi(val);
         else if (strcmp(key, "log_level") == 0)
             cfg->log_level = atoi(val);
         else if (strcmp(key, "max_log_size_mb") == 0)

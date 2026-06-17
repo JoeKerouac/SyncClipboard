@@ -62,7 +62,10 @@ public class V2WebSocketHandler extends TextWebSocketHandler {
             session.close(new CloseStatus(1011, "auth attrs missing"));
             return;
         }
-        sessionManager.addAuthenticated(session, username, deviceId);
+        if (!sessionManager.addAuthenticated(session, username, deviceId)) {
+            session.close(new CloseStatus(1008, "too many sessions"));
+            return;
+        }
         log.info("[V2-CONNECT] sessionId={}, user={}, device={}", session.getId(), username, deviceId);
         // Send a hello_ack so the client knows server capabilities.
         WsMessage.HelloAck ack = new WsMessage.HelloAck(

@@ -23,6 +23,7 @@ import java.util.stream.Collectors;
 public class SessionManager {
 
     private static final Logger log = LoggerFactory.getLogger(SessionManager.class);
+    private static final int MAX_SESSIONS_PER_USER = 10;
 
     private final ExecutorService broadcastPool = Executors.newFixedThreadPool(
             Runtime.getRuntime().availableProcessors(),
@@ -34,13 +35,21 @@ public class SessionManager {
         sessions.put(session.getId(), new ClientSession(session));
     }
 
-    public void addAuthenticated(WebSocketSession session, String username, String deviceId) {
+    public boolean addAuthenticated(WebSocketSession session, String username, String deviceId) {
+        long count = sessions.values().stream()
+                .filter(s -> s.isLoggedIn() && username.equals(s.getUsername()))
+                .count();
+        if (count >= MAX_SESSIONS_PER_USER) {
+            log.warn("[SESSION] user={} exceeded max sessions ({}), rejecting", username, MAX_SESSIONS_PER_USER);
+            return false;
+        }
         ClientSession cs = new ClientSession(session);
         cs.setAuthenticated(true);
         cs.setLoggedIn(true);
         cs.setUsername(username);
         cs.setDeviceId(deviceId);
         sessions.put(session.getId(), cs);
+        return true;
     }
 
     public void removeSession(String sessionId) {
@@ -57,9 +66,6 @@ public class SessionManager {
 
     public record SendResult(String deviceId, String sessionId, boolean success, long elapsedMs, String error) {}
 
-    /**
-     * 向同一用户的其他在线客户端广播消息，返回每个设备的发送结果(含耗时)
-     */
     public List<SendResult> broadcastToUser(String username, String senderSessionId, String message) {
         List<ClientSession> targets = sessions.values().stream()
                 .filter(s -> s.isLoggedIn()
@@ -67,7 +73,7 @@ public class SessionManager {
                         && !s.getSession().getId().equals(senderSessionId))
                 .collect(Collectors.toList());
 
-        log.debug("[BROADCAST] user={}, 排除发送者后目标数={}", username, targets.size());
+        log.debug("[BROADCAST] user={}, targets={}", username, targets.size());
 
         List<CompletableFuture<SendResult>> futures = new ArrayList<>();
         for (ClientSession target : targets) {
@@ -79,10 +85,12 @@ public class SessionManager {
                         long elapsed = System.currentTimeMillis() - start;
                         return new SendResult(target.getDeviceId(), target.getSession().getId(), true, elapsed, null);
                     } else {
+                        sessions.remove(target.getSession().getId());
                         return new SendResult(target.getDeviceId(), target.getSession().getId(), false, 0, "session closed");
                     }
                 } catch (IOException e) {
                     long elapsed = System.currentTimeMillis() - start;
+                    sessions.remove(target.getSession().getId());
                     return new SendResult(target.getDeviceId(), target.getSession().getId(), false, elapsed, e.getMessage());
                 }
             }, broadcastPool));
@@ -113,7 +121,7 @@ public class SessionManager {
                     cs.getSession().sendMessage(new TextMessage(message));
                     sent++;
                 } catch (IOException e) {
-                    log.error("[SEND] 发送到设备失败 device={}, error={}", targetDeviceId, e.getMessage());
+                    log.error("[SEND] failed to send to device={}, error={}", targetDeviceId, e.getMessage());
                 }
             }
         }
@@ -122,7 +130,7 @@ public class SessionManager {
 
     @PreDestroy
     public void shutdown() {
-        log.info("[SHUTDOWN] 关闭 broadcastPool, pending sessions={}", sessions.size());
+        log.info("[SHUTDOWN] closing broadcastPool, pending sessions={}", sessions.size());
         broadcastPool.shutdown();
         try {
             if (!broadcastPool.awaitTermination(5, TimeUnit.SECONDS)) {

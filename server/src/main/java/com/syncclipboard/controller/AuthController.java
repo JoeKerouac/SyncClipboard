@@ -69,6 +69,11 @@ public class AuthController {
                     "code", "AUTH_INVALID",
                     "message", "Refresh token invalid or expired"));
         }
+        if (!userService.listUsers().contains(parsed.username())) {
+            return ResponseEntity.status(401).body(Map.of(
+                    "code", "AUTH_INVALID",
+                    "message", "User no longer exists"));
+        }
         TokenPair tokens = issueTokens(parsed.username(), parsed.deviceId());
         return ResponseEntity.ok(tokens);
     }
